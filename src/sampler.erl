@@ -74,7 +74,7 @@ init([OwnerPID,Mode,SampleInterval,QueueLength,M,F,Args]) when SampleInterval ==
 init([OwnerPID,Mode,SampleInterval,QueueLength,M,F,Args]) when is_integer(SampleInterval),
 						      SampleInterval > 0->
   erlang:monitor(process,OwnerPID),
-  {ok,Timer} = fixtimer:apply_interval(SampleInterval,?MODULE,sample,[self()]),
+  {ok,Timer} = timer:apply_interval(SampleInterval,?MODULE,sample,[self()]),
   {ok, #state{m=M,f=F,a=Args,
 	      owner=OwnerPID,
 	      timer = Timer,

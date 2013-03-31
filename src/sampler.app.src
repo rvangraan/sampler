@@ -4,6 +4,6 @@
     {modules, 
 	[]},
     {registered, []},
-    {applications, [kernel, stdlib]},
+    {applications, [kernel, stdlib, gproc]},
     {env, []}
 ]}.

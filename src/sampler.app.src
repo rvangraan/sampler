@@ -1,0 +1,9 @@
+{application, sampler,
+   [{description, "Library providing the ability to periodically sample a value and calculate moving averages"},
+    {vsn, "1.0.0"},
+    {modules, 
+	[]},
+    {registered, []},
+    {applications, [kernel, stdlib]},
+    {env, []}
+]}.

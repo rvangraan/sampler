@@ -2,7 +2,7 @@
 %%% File    :  sampler.erl
 %%% Author  :  Rudolph van Graan <>
 %%% Copyright: Rudolph van Graan
-%%% Descriptionx
+%%% Description
 %%%
 %%% Created :  4 Feb 2007 by Rudolph van Graan <>
 %%%-------------------------------------------------------------------
@@ -10,8 +10,10 @@
 
 -behaviour(gen_server).
 
+-include("../include/sampler.hrl").
 %% API
--export([start_link/6,
+-export([start_link/1,
+	 start_link/6,
 	 queue_size/1,
 	 get_moving_average/1,
 	 get_sum/1,
@@ -21,12 +23,16 @@
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
--record(state, {m,f,a,
+-record(state, {sample_func,
+		name,
 		owner,
 		sample,
 		mode,
 		length,
 		timer,
+		scope = local,
+		gproc_property,
+		gproc_label,
 		samples=0,
 		last=undefined,
 	        values=[]}).
@@ -34,60 +40,104 @@
 %%====================================================================
 %% API
 %%====================================================================
-%%--------------------------------------------------------------------
-%% Mode = counter 
-%% SampleInterval = integer() | manual_sampling
-%% QueueLength    = integer()
-%% M,F,Args
+
+start_link(Sampler = #sampler{}) ->
+    PID = self(),
+    gen_server:start_link(?MODULE, [PID,Sampler], []).
 %%--------------------------------------------------------------------
 start_link(Mode,SampleInterval,QueueLength,M,F,Args) ->
   PID = self(),
-  gen_server:start_link(?MODULE, [PID,Mode,SampleInterval,QueueLength,M,F,Args], []).
+  gen_server:start_link(?MODULE, [PID,#sampler{mode            = Mode,
+					       sample_interval = SampleInterval,
+					       history_length  = QueueLength,
+					       sample_func     = {M,F,Args}
+					      }], []).
+%%--------------------------------------------------------------------
+queue_size(NameOrPid) ->
+  gen_server:call(locate(NameOrPid),queue_size).
 
-queue_size(PID) ->
-  gen_server:call(PID,queue_size).
+%%--------------------------------------------------------------------
+get_moving_average(NameOrPid) ->
+  gen_server:call(locate(NameOrPid),get_moving_average).
 
-get_moving_average(PID) ->
-  gen_server:call(PID,get_moving_average).
+%%--------------------------------------------------------------------
+get_sum(NameOrPid) ->
+  gen_server:call(locate(NameOrPid),get_sum).
 
-get_sum(PID) ->
-  gen_server:call(PID,get_sum).
+%%--------------------------------------------------------------------
+sample(NameOrPid) ->
+  gen_server:call(locate(NameOrPid),sample).
 
-sample(PID) ->
-  gen_server:call(PID,sample).
+%%--------------------------------------------------------------------
+samples(NameOrPid) ->
+  gen_server:call(locate(NameOrPid),samples).
 
-samples(PID) ->
-  gen_server:call(PID,samples).
 
+%%--------------------------------------------------------------------
+locate(Pid) when is_pid(Pid) ->
+    Pid;
+locate(Name) ->
+    gproc:where({p,l, {sampler, Name}}).
 
 %%====================================================================
 %% gen_server callbacks
 %%====================================================================
 
 %%--------------------------------------------------------------------
-init([OwnerPID,Mode,SampleInterval,QueueLength,M,F,Args]) when SampleInterval == manual_sampling ->
-  erlang:monitor(process,OwnerPID),
-  {ok, #state{m=M,f=F,a=Args,
-	      owner=OwnerPID,
-	      mode=Mode,sample=SampleInterval,
-	      length=QueueLength}};
-init([OwnerPID,Mode,SampleInterval,QueueLength,M,F,Args]) when is_integer(SampleInterval),
-						      SampleInterval > 0->
-  erlang:monitor(process,OwnerPID),
-  {ok,Timer} = timer:apply_interval(SampleInterval,?MODULE,sample,[self()]),
-  {ok, #state{m=M,f=F,a=Args,
-	      owner=OwnerPID,
-	      timer = Timer,
-	      mode=Mode,sample=SampleInterval,
-	      length=QueueLength}}.
+init([OwnerPID,Sampler = #sampler{sample_interval = SampleInterval}]) ->
+    erlang:monitor(process,OwnerPID),
+    ok = register_name(Sampler),
+    {ok,Timer} = case SampleInterval of 
+		     manual_sampling ->
+			 {ok,undefined};
+		     SamplerInterval when is_integer(SamplerInterval),
+					  SamplerInterval > 0 ->
+			 timer:apply_interval(SampleInterval,?MODULE,sample,[self()])
+		 end,
+    {ok, #state{sample_func    = ensure_fun(Sampler#sampler.sample_func),
+		name           = Sampler#sampler.name,
+		owner          = OwnerPID,
+		timer          = Timer,
+		mode           = Sampler#sampler.mode,
+		scope          = Sampler#sampler.scope,
+		sample         = Sampler#sampler.sample_interval,
+		gproc_property = Sampler#sampler.gproc_property,
+		gproc_label    = Sampler#sampler.gproc_label,
+		length         = Sampler#sampler.history_length}}.
+%%--------------------------------------------------------------------
+ensure_fun({M,F,A}) ->
+    fun() ->
+	    erlang:apply(M,F,A)
+    end;
+ensure_fun(Fun) when is_function(Fun,0) ->
+    Fun.
+%%--------------------------------------------------------------------
+register_name(#sampler{name = Name, 
+		       gproc_property = GProcProperty,
+		       scope = Scope} = Sampler) when Scope == local;
+						      Scope == global ->
+    GprocScope = case Scope of
+		     local -> l;
+		     global -> g
+		 end,
+    case Name of 
+	undefined -> ok;
+	Name      ->
+	    true = gproc:reg({n,GprocScope, {sampler, Name}})
+    end,
+    case GProcProperty of
+	undefined -> ok;
+	GProcProperty ->
+	    Label = Sampler#sampler.gproc_label,
+	    true = gproc:reg({p,GprocScope, GProcProperty},{Label,0})
+    end,
+    true = gproc:reg({p,GprocScope, sample_interval},{Name,Sampler#sampler.sample_interval}),
+    ok.
+
 
 %%--------------------------------------------------------------------
-handle_call(get_moving_average, _From, State) when State#state.values == [] ->
-  Reply = 0,
-  {reply, Reply, State};
-handle_call(get_moving_average, _From, State) when State#state.values =/= [] ->
-  S = lists:foldl(fun(V,Acc) -> V+Acc end,0, State#state.values),
-  Reply = S/length(State#state.values),
+handle_call(get_moving_average, _From, State) ->
+  Reply = calculate_moving_average(State),
   {reply, Reply, State};
 
 handle_call(get_sum, _From, State) when State#state.mode =:= counter ->
@@ -107,19 +157,44 @@ handle_call(sample, _From, State) when State#state.mode == absolute ->
 handle_call(sample, _From, State) when State#state.mode == counter,
                                        State#state.last == undefined,
                                        State#state.values == []->
-  FirstValue = get_value(State),
-  Reply = ok,
-  {reply, Reply, State#state{last=FirstValue,samples=State#state.samples+1}};
+    FirstValue = get_value(State),
+    Reply = ok,
+    NewState = State#state{last=FirstValue,samples=State#state.samples+1},
+    ok = publish_value(NewState),
+    {reply, Reply, NewState};
 handle_call(sample, _From, State) when State#state.mode == counter,
                                        State#state.last =/= undefined->
-  NextValue = get_value(State),
-  LastValue = State#state.last,
-  Reply = ok,
-  NewValues = string:substr([(NextValue-LastValue)|State#state.values],1,State#state.length),
-  {reply, Reply, State#state{last=NextValue,
-			     values=NewValues,
-			     samples=State#state.samples+1}}.
+    NextValue = get_value(State),
+    LastValue = State#state.last,
+    Reply = ok,
+    NewValues = string:substr([(NextValue-LastValue)|State#state.values],1,State#state.length),
+    NewState = State#state{last=NextValue,
+			   values=NewValues,
+			   samples=State#state.samples+1},
+    ok = publish_value(NewState),
+    {reply, Reply, NewState}.
   
+%%--------------------------------------------------------------------
+publish_value(State) ->
+    MovAvg = calculate_moving_average(State),
+    Scope = case State#state.scope of
+		local ->  l;
+		global -> g
+	    end,
+    case State#state.gproc_property of
+	undefined -> ok;
+	GProcProperty ->
+	    Label = State#state.gproc_label,
+	    true = gproc:set_value({p,Scope,GProcProperty},{Label,MovAvg}),
+	    ok
+    end.
+%%--------------------------------------------------------------------
+calculate_moving_average(State) when State#state.values == [] ->
+    0;
+calculate_moving_average(State) when State#state.values =/= [] ->
+    S = lists:foldl(fun(V,Acc) -> V+Acc end,0, State#state.values),
+    S/length(State#state.values).
+    
 
 %%--------------------------------------------------------------------
 handle_cast(_Msg, State) ->
@@ -143,7 +218,22 @@ code_change(_OldVsn, State, _Extra) ->
 
 
 get_value(State) ->
-  M    = State#state.m,
-  F    = State#state.f,
-  Args = State#state.a,
-  M:F(Args).
+    SampleFun    = State#state.sample_func,
+    try
+	case SampleFun() of
+	    Integer when is_integer(Integer) ->
+		Integer;
+	    Else ->
+		error_logger:warning_report([{sampler, State#state.name},
+					     {message, "Sampler returned invalid value. Value should be an integer"},
+					     {value, Else}]),
+		0
+	end
+    catch
+	C:E ->
+	    error_logger:error_report([{sampler, State#state.name},
+				       {message,"Unable to sample value. Value ignored."},
+				       {reason,E},
+				       {stacktrace,erlang:get_stacktrace()}]),
+	    0
+    end.

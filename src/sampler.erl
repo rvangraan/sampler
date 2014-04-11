@@ -77,7 +77,7 @@ samples(NameOrPid) ->
 locate(Pid) when is_pid(Pid) ->
     Pid;
 locate(Name) ->
-    gproc:where({p,l, {sampler, Name}}).
+    gproc:where({n,l, {sampler, Name}}).
 
 %%====================================================================
 %% gen_server callbacks
